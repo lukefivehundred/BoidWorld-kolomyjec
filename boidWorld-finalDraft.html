@@ -1,0 +1,933 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Boid World</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #0b1026;
+            font-family: monospace;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+        }
+        
+        #canvas-container {
+            width: 900px;
+            height: 900px;
+            position: relative;
+            background-color: #0b1026;
+            box-shadow: 0 0 50px rgba(0,0,0,0.5);
+            border: none;
+        }
+
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+
+        /* Print Modal Styles */
+        #print-modal {
+            display: none;
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(10, 12, 20, 0.95);
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 0 30px rgba(0,0,0,0.8);
+            color: #fff;
+            z-index: 1000;
+            width: 300px;
+            backdrop-filter: blur(5px);
+            font-family: 'Courier New', Courier, monospace;
+        }
+
+        #print-modal h2 {
+            margin-top: 0;
+            font-size: 1.2rem;
+            border-bottom: 1px solid #444;
+            padding-bottom: 10px;
+            margin-bottom: 15px;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+        }
+
+        .form-group {
+            margin-bottom: 15px;
+        }
+
+        .form-group label {
+            display: block;
+            font-size: 0.8rem;
+            color: #aaa;
+            margin-bottom: 5px;
+        }
+
+        .form-group input {
+            width: 100%;
+            background: #222;
+            border: 1px solid #444;
+            color: #fff;
+            padding: 8px;
+            font-family: inherit;
+            box-sizing: border-box;
+        }
+
+        .button-group {
+            display: flex;
+            justify-content: space-between;
+            margin-top: 20px;
+        }
+
+        button {
+            background: #333;
+            color: #fff;
+            border: 1px solid #555;
+            padding: 8px 16px;
+            cursor: pointer;
+            font-family: inherit;
+            transition: background 0.2s;
+        }
+
+        button:hover {
+            background: #555;
+        }
+
+        button#btn-print {
+            background: #2a9d8f;
+            border-color: #2a9d8f;
+        }
+
+        button#btn-print:hover {
+            background: #21867a;
+        }
+    </style>
+</head>
+<body>
+    
+    <div id="canvas-container"></div>
+
+    <!-- Print Dialog Overlay -->
+    <div id="print-modal">
+        <h2>Print Settings</h2>
+        <div class="form-group">
+            <label for="inp-filename">Filename</label>
+            <input type="text" id="inp-filename" value="StarryNightCapture.png">
+        </div>
+        <div class="form-group">
+            <label for="inp-width">Width (px)</label>
+            <input type="number" id="inp-width">
+        </div>
+        <div class="form-group">
+            <label for="inp-height">Height (px)</label>
+            <input type="number" id="inp-height">
+        </div>
+        <div class="button-group">
+            <button id="btn-cancel">Cancel</button>
+            <button id="btn-print">Print / Save</button>
+        </div>
+    </div>
+
+    <!-- Import Map for Three.js -->
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+        // --- Configuration ---
+        const CONFIG = {
+            numContinents: 6,
+            numClouds: 5,
+            numParticles: 250, 
+            worldRadius: 1200, 
+            cloudRadius: 1300, // Higher than continents
+            atmosRadius: 1250, // Boid flight height
+            particleSpeed: 6.25 
+        };
+
+        // --- Globals ---
+        let scene, camera, renderer, controls;
+        let continents = [];
+        let clouds = [];
+        let particles = [];
+        let time = 0;
+        let planetGroup; // Group for rotating the world (sphere + continents + clouds)
+        let enclosingSphere;
+        let milkyWay;
+        let isPaused = false;
+
+        // Shared Geometry
+        const sharedSphereGeo = new THREE.SphereGeometry(10, 8, 8); 
+
+        // --- Utility: Create a soft glow texture for stars ---
+        function createStarTexture() {
+            const canvas = document.createElement('canvas');
+            canvas.width = 32;
+            canvas.height = 32;
+            const ctx = canvas.getContext('2d');
+            
+            const grad = ctx.createRadialGradient(16, 16, 0, 16, 16, 16);
+            grad.addColorStop(0, 'rgba(255, 255, 255, 1)');
+            grad.addColorStop(0.2, 'rgba(255, 255, 255, 0.8)');
+            grad.addColorStop(0.5, 'rgba(255, 255, 255, 0.2)');
+            grad.addColorStop(1, 'rgba(255, 255, 255, 0)');
+            
+            ctx.fillStyle = grad;
+            ctx.fillRect(0, 0, 32, 32);
+            
+            const texture = new THREE.CanvasTexture(canvas);
+            return texture;
+        }
+        
+        const starTexture = createStarTexture();
+
+        // --- Utility: Create a SOLID dot texture for land ---
+        function createSolidTexture() {
+            const canvas = document.createElement('canvas');
+            canvas.width = 32;
+            canvas.height = 32;
+            const ctx = canvas.getContext('2d');
+            
+            // Hard circle
+            ctx.fillStyle = '#ffffff';
+            ctx.beginPath();
+            ctx.arc(16, 16, 14, 0, Math.PI * 2);
+            ctx.fill();
+            
+            const texture = new THREE.CanvasTexture(canvas);
+            return texture;
+        }
+        
+        const solidTexture = createSolidTexture();
+
+        // --- FUNC: Create Milky Way Background ---
+        function createMilkyWay() {
+            const galaxyGroup = new THREE.Group();
+            
+            // Layer 1: The Galactic Band (Nebula fog)
+            const bandGeo = new THREE.BufferGeometry();
+            const bandPos = [];
+            const bandCols = [];
+            const count = 4000;
+            
+            // Colors for the nebula: Deep Violet to bright Blue
+            const c1 = new THREE.Color(0x220033); 
+            const c2 = new THREE.Color(0x0066ff); 
+            const tempColor = new THREE.Color();
+
+            for(let i=0; i<count; i++) {
+                const angle = Math.random() * Math.PI * 2;
+                const r = 4000 + Math.random() * 2000; 
+                const spread = (Math.random() - 0.5) * (Math.random() - 0.5) * 1200;
+                
+                const x = r * Math.cos(angle);
+                const y = spread;
+                const z = r * Math.sin(angle);
+                
+                bandPos.push(x, y, z);
+                
+                tempColor.copy(c1).lerp(c2, Math.random());
+                const intensity = 0.5 + Math.random() * 0.5;
+                bandCols.push(tempColor.r * intensity, tempColor.g * intensity, tempColor.b * intensity);
+            }
+            
+            bandGeo.setAttribute('position', new THREE.Float32BufferAttribute(bandPos, 3));
+            bandGeo.setAttribute('color', new THREE.Float32BufferAttribute(bandCols, 3));
+            
+            const bandMat = new THREE.PointsMaterial({
+                size: 90,
+                map: starTexture,
+                vertexColors: true,
+                transparent: true,
+                opacity: 0.25,
+                depthWrite: false,
+                blending: THREE.AdditiveBlending
+            });
+            const band = new THREE.Points(bandGeo, bandMat);
+            galaxyGroup.add(band);
+
+            // Layer 2: Bright distant stars
+            const starsGeo = new THREE.BufferGeometry();
+            const starsPos = [];
+            const starCount = 1500;
+            
+            for(let i=0; i<starCount; i++) {
+                const angle = Math.random() * Math.PI * 2;
+                const r = 3500 + Math.random() * 3000;
+                const spread = (Math.random() - 0.5) * 2500;
+                
+                const x = r * Math.cos(angle);
+                const y = spread;
+                const z = r * Math.sin(angle);
+                starsPos.push(x, y, z);
+            }
+            
+            starsGeo.setAttribute('position', new THREE.Float32BufferAttribute(starsPos, 3));
+            const starsMat = new THREE.PointsMaterial({
+                size: 50,
+                map: starTexture,
+                color: 0xffffff,
+                transparent: true,
+                opacity: 0.8,
+                depthWrite: false,
+                blending: THREE.AdditiveBlending
+            });
+            const stars = new THREE.Points(starsGeo, starsMat);
+            galaxyGroup.add(stars);
+
+            galaxyGroup.rotation.x = Math.PI / 5;
+            galaxyGroup.rotation.z = Math.PI / 8;
+
+            scene.add(galaxyGroup);
+            return galaxyGroup;
+        }
+
+        // --- NEW: Atmosphere/Glass Shader ---
+        function createAtmosphereMaterial() {
+            const vertexShader = `
+                varying vec3 vNormal;
+                void main() {
+                    vNormal = normalize(normalMatrix * normal);
+                    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+                }
+            `;
+
+            const fragmentShader = `
+                varying vec3 vNormal;
+                void main() {
+                    float viewDot = dot(vNormal, vec3(0.0, 0.0, 1.0));
+                    float fresnel = 1.0 - clamp(viewDot, 0.0, 1.0);
+                    float intensity = pow(fresnel, 2.0);
+                    vec3 atmosphereColor = vec3(0.4, 0.8, 1.0);
+                    gl_FragColor = vec4(atmosphereColor, 0.08 + intensity * 0.8);
+                }
+            `;
+
+            return new THREE.ShaderMaterial({
+                uniforms: {},
+                vertexShader: vertexShader,
+                fragmentShader: fragmentShader,
+                side: THREE.FrontSide, 
+                blending: THREE.AdditiveBlending,
+                transparent: true,
+                depthWrite: false
+            });
+        }
+
+        // --- CLASS: Continent (Anchored Land) ---
+        class Continent {
+            constructor() {
+                this.meshGroup = new THREE.Group();
+                // Add to planetGroup so it rotates with the world
+                planetGroup.add(this.meshGroup);
+
+                // Initial Random Position on Surface
+                const theta = Math.random() * Math.PI * 2;
+                const phi = Math.acos((Math.random() * 2) - 1);
+                
+                this.meshGroup.position.setFromSphericalCoords(CONFIG.worldRadius, phi, theta);
+                this.meshGroup.lookAt(0, 0, 0); 
+
+                this.numStars = 400 + Math.floor(Math.random() * 200);
+                this.radius = 250 + Math.random() * 250; 
+                
+                const geometry = new THREE.BufferGeometry();
+                const positions = [];
+                const colors = [];
+                const sizes = [];
+                const colorObj = new THREE.Color();
+                
+                // --- PHYLLOTAXIS SETTINGS ---
+                const baseAngle = Math.PI * (3 - Math.sqrt(5));
+                const angleIncrement = baseAngle + (Math.random() - 0.5) * 0.1; 
+                const spreadPower = 0.5; // More uniform spread for land
+
+                for (let i = 0; i < this.numStars; i++) {
+                    const t = i / this.numStars;
+                    const r = Math.pow(t, spreadPower) * this.radius; 
+                    const a = i * angleIncrement;
+                    
+                    let lx = r * Math.cos(a);
+                    let ly = r * Math.sin(a);
+                    
+                    const R = CONFIG.worldRadius;
+                    const distSq = lx*lx + ly*ly;
+                    let sphereZ = 0;
+                    
+                    if (distSq < R*R) {
+                        sphereZ = R - Math.sqrt(R*R - distSq); 
+                    }
+                    
+                    // --- Elevation & Topography ---
+                    // 0.0 at Center, 1.0 at Edge
+                    const distRatio = r / this.radius;
+                    
+                    // Elevation curve: Adjusted to be lower (max ~120)
+                    const elevation = Math.pow(1.0 - distRatio, 2.0) * 120.0;
+                    
+                    // In local space, -Z is "up/out" from the planet center because lookAt points +Z to origin
+                    let lz = sphereZ - elevation + (Math.random() - 0.5) * 10; 
+
+                    positions.push(lx, ly, lz);
+
+                    // --- Variegated Earth-Tone Palette ---
+                    // LIGHTER PALETTE (Restored some brightness for "Pop")
+                    
+                    if (distRatio < 0.2) {
+                        // High Peaks: Bright White/Grey
+                        const shade = 0.7 + Math.random() * 0.3; 
+                        colorObj.setRGB(shade, shade, shade); 
+                        // Occasional rocky contrast
+                        if(Math.random() > 0.8) colorObj.lerp(new THREE.Color(0x555555), 0.5);
+                    } else if (distRatio < 0.6) {
+                        // Mid-Lands: Vibrant Forest / Earth
+                        if (Math.random() > 0.4) {
+                            // Forest Green (Lightened)
+                            const h = 0.25 + Math.random() * 0.1; 
+                            const s = 0.6 + Math.random() * 0.4;
+                            const l = 0.35 + Math.random() * 0.2; // Brighter
+                            colorObj.setHSL(h, s, l);
+                        } else {
+                            // Earth/Dirt (Lightened)
+                            const h = 0.08 + Math.random() * 0.08; 
+                            const s = 0.5 + Math.random() * 0.3;
+                            const l = 0.3 + Math.random() * 0.2; // Brighter
+                            colorObj.setHSL(h, s, l);
+                        }
+                    } else {
+                        // Coast: Golden Sand / Clay
+                        const h = 0.11 + Math.random() * 0.05; 
+                        const s = 0.6 + Math.random() * 0.3;
+                        const l = 0.4 + Math.random() * 0.2; // Brighter
+                        colorObj.setHSL(h, s, l);
+                    }
+
+                    colors.push(colorObj.r, colorObj.g, colorObj.b);
+
+                    // --- Scale Topography ---
+                    // Linear Interpolation: 
+                    // Center (distRatio 0.0) -> Multiplier 5.0 (Size ~100)
+                    // Edge (distRatio 1.0)   -> Multiplier 1.0 (Size ~20)
+                    const sizeMultiplier = 1.0 + (1.0 - distRatio) * 4.0;
+                    sizes.push(sizeMultiplier * 20); 
+                }
+
+                geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+                geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+                geometry.setAttribute('size', new THREE.Float32BufferAttribute(sizes, 1));
+
+                const material = new THREE.PointsMaterial({
+                    size: 20, 
+                    map: starTexture, // Soft Glow
+                    vertexColors: true,
+                    transparent: true,
+                    opacity: 0.8, // Increased opacity slightly for more pop
+                    blending: THREE.AdditiveBlending, 
+                    depthWrite: false,
+                    sizeAttenuation: true
+                });
+
+                this.points = new THREE.Points(geometry, material);
+                this.meshGroup.add(this.points);
+                
+                this.basePositions = positions.slice();
+                this.breathingOffset = Math.random() * 100;
+            }
+
+            update(delta) {
+                // Continents don't move relative to the planet (anchored),
+                // but they "breathe" slightly
+                const positions = this.points.geometry.attributes.position.array;
+                const timeScale = (time + this.breathingOffset) * 2;
+                const pulse = Math.sin(timeScale) * 0.02 + 1.0; 
+
+                for(let i=0; i < this.numStars; i++) {
+                    const i3 = i * 3;
+                    positions[i3] = this.basePositions[i3] * pulse;
+                    positions[i3+1] = this.basePositions[i3+1] * pulse;
+                    positions[i3+2] = this.basePositions[i3+2] * pulse;
+                }
+                this.points.geometry.attributes.position.needsUpdate = true;
+            }
+        }
+
+        // --- CLASS: Cloud (Hurricane) ---
+        class Cloud {
+            constructor() {
+                this.meshGroup = new THREE.Group();
+                // Add to planetGroup so they generally rotate with world
+                planetGroup.add(this.meshGroup);
+
+                // Random Position on Cloud Shell
+                const theta = Math.random() * Math.PI * 2;
+                const phi = Math.acos((Math.random() * 2) - 1);
+                
+                this.meshGroup.position.setFromSphericalCoords(CONFIG.cloudRadius, phi, theta);
+                this.meshGroup.lookAt(0, 0, 0); 
+
+                this.numStars = 400 + Math.floor(Math.random() * 100);
+                this.radius = 300 + Math.random() * 200; 
+
+                // Colors: White, Gray, Blueish
+                const type = Math.random();
+                let hue, sat, lig;
+                if (type < 0.6) { // White/Gray
+                    hue = 0.6; 
+                    sat = 0.1;
+                    lig = 0.8 + Math.random() * 0.2;
+                } else { // Stormy Blue
+                    hue = 0.6 + Math.random() * 0.1;
+                    sat = 0.4;
+                    lig = 0.6;
+                }
+                this.colorHSL = { h: hue, s: sat, l: lig };
+
+                const geometry = new THREE.BufferGeometry();
+                const positions = [];
+                const colors = [];
+                const sizes = [];
+                const colorObj = new THREE.Color();
+                
+                // Spiral / Hurricane Distribution
+                const angleIncrement = 0.1 + Math.random() * 0.1; 
+
+                for (let i = 0; i < this.numStars; i++) {
+                    const t = i / this.numStars;
+                    // Spiral spread
+                    const r = t * this.radius; 
+                    const a = i * angleIncrement * 5.0; // Tighter spiral
+                    
+                    let lx = r * Math.cos(a);
+                    let ly = r * Math.sin(a);
+                    
+                    // Curvature adjustment
+                    const R = CONFIG.cloudRadius;
+                    const distSq = lx*lx + ly*ly;
+                    let sphereZ = 0;
+                    if (distSq < R*R) {
+                        sphereZ = R - Math.sqrt(R*R - distSq); 
+                    }
+                    
+                    // Fluffier depth
+                    let lz = sphereZ + (Math.random() - 0.5) * 80; 
+
+                    positions.push(lx, ly, lz);
+
+                    const l = this.colorHSL.l + (Math.random() - 0.5) * 0.1;
+                    colorObj.setHSL(this.colorHSL.h, this.colorHSL.s, l);
+                    colors.push(colorObj.r, colorObj.g, colorObj.b);
+
+                    // Clouds are "blurry" -> larger points
+                    sizes.push(((Math.random() * 6 + 4) * 50)); 
+                }
+
+                geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+                geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+                geometry.setAttribute('size', new THREE.Float32BufferAttribute(sizes, 1));
+
+                const material = new THREE.PointsMaterial({
+                    size: 50, 
+                    map: starTexture,
+                    vertexColors: true,
+                    transparent: true,
+                    opacity: 0.6, // More transparent/ghostly
+                    blending: THREE.AdditiveBlending,
+                    depthWrite: false,
+                    sizeAttenuation: true
+                });
+
+                this.points = new THREE.Points(geometry, material);
+                this.meshGroup.add(this.points);
+                
+                // Hurricane Spin Speed
+                this.spinSpeed = (Math.random() * 0.05 + 0.02) * (Math.random() > 0.5 ? 1 : -1);
+            }
+
+            update(delta) {
+                // Rotate locally (Hurricane spin)
+                this.meshGroup.rotation.z += this.spinSpeed * delta;
+            }
+        }
+
+        // --- CLASS: Customizable Boid (Personality) ---
+        class Particle3D {
+            constructor(options = {}) {
+                // --- Attributes with Defaults ---
+                this.headColor = options.headColor || new THREE.Color(0xff4500); 
+                this.bodyColor = options.bodyColor || new THREE.Color().setHSL(0.6, 0.8, 0.6); 
+                
+                this.length = options.length || 15; // Number of spheres in chain
+                this.headRadius = options.headRadius || 12;
+                this.tailRadius = options.tailRadius || 3;
+                this.spacingInterval = options.spacingInterval || 2; // Sample every Nth trail point
+                
+                // --- Physics Init ---
+                const theta = Math.random() * Math.PI * 2;
+                const phi = Math.acos((Math.random() * 2) - 1);
+                this.pos = new THREE.Vector3().setFromSphericalCoords(CONFIG.atmosRadius, phi, theta);
+
+                const normal = this.pos.clone().normalize();
+                const randomVec = new THREE.Vector3(Math.random()-0.5, Math.random()-0.5, Math.random()-0.5);
+                this.vel = randomVec.sub(normal.multiplyScalar(randomVec.dot(normal))).normalize().multiplyScalar(5);
+
+                this.acc = new THREE.Vector3();
+                this.maxSpeed = CONFIG.particleSpeed;
+                this.maxForce = 0.25; 
+
+                // --- Visuals Init ---
+                this.trailPoints = [];
+                this.spheres = []; 
+                this.meshGroup = new THREE.Group();
+                scene.add(this.meshGroup);
+
+                this.totalHistory = this.length * this.spacingInterval;
+                
+                for(let i=0; i < this.totalHistory; i++) {
+                    this.trailPoints.push(this.pos.clone());
+                }
+
+                // Create Sprites ("Living Comets")
+                for(let i=0; i < this.length; i++) {
+                    const t = i / (this.length - 1);
+                    const color = this.headColor.clone().lerp(this.bodyColor, t);
+                    const opacity = 1.0 - (t * 0.8); 
+
+                    const mat = new THREE.SpriteMaterial({
+                        map: starTexture,
+                        color: color,
+                        transparent: true,
+                        opacity: opacity,
+                        blending: THREE.AdditiveBlending,
+                        depthWrite: false
+                    });
+
+                    const sprite = new THREE.Sprite(mat);
+                    const r = THREE.MathUtils.lerp(this.headRadius, this.tailRadius, t);
+                    const size = (r * 0.5625) * 5.0;
+                    sprite.scale.set(size, size, 1.0);
+                    
+                    this.spheres.push(sprite);
+                    this.meshGroup.add(sprite);
+                }
+            }
+
+            applyForce(force) {
+                this.acc.add(force);
+            }
+
+            // Updated to avoid Clouds AND Continents
+            update(allParticles, clouds, continents) {
+                let closeNeighbors = 0;
+                let avgVel = new THREE.Vector3();
+                let avgPos = new THREE.Vector3();
+                const perceptionRadius = 200; 
+                
+                for (let other of allParticles) {
+                    if (other === this) continue;
+                    const d = this.pos.distanceTo(other.pos);
+                    if (d < perceptionRadius) {
+                        avgVel.add(other.vel);
+                        avgPos.add(other.pos);
+                        
+                        let diff = new THREE.Vector3().subVectors(this.pos, other.pos);
+                        diff.divideScalar(d * d); 
+                        this.applyForce(diff.multiplyScalar(10.0)); 
+                        
+                        closeNeighbors++;
+                    }
+                }
+
+                if (closeNeighbors > 0) {
+                    avgVel.divideScalar(closeNeighbors);
+                    avgPos.divideScalar(closeNeighbors);
+                    avgVel.sub(this.vel).multiplyScalar(0.05);
+                    this.applyForce(avgVel);
+                    avgPos.sub(this.pos).multiplyScalar(0.0005);
+                    this.applyForce(avgPos);
+                }
+
+                // Avoid Clouds (Hurricanes)
+                for(let cloud of clouds) {
+                    const cloudPos = new THREE.Vector3();
+                    cloud.meshGroup.getWorldPosition(cloudPos);
+
+                    const d = this.pos.distanceTo(cloudPos);
+                    const influenceRad = cloud.radius * 2.5; 
+
+                    if (d < influenceRad) {
+                        const normal = this.pos.clone().normalize();
+                        
+                        const dir = new THREE.Vector3().subVectors(this.pos, cloudPos).normalize();
+                        dir.sub(normal.clone().multiplyScalar(dir.dot(normal))).normalize();
+
+                        const cross = normal.clone().cross(dir).normalize();
+                        
+                        if (d < cloud.radius * 1.2) {
+                             this.applyForce(dir.multiplyScalar(4.0)); 
+                        }
+                        this.applyForce(cross.multiplyScalar(1.5)); 
+                        
+                        const distFactor = 1 - (d / influenceRad);
+                        if (distFactor > 0) {
+                            const stormCol = new THREE.Color(0x88ccff);
+                            this.bodyColor.lerp(stormCol, 0.02);
+                            
+                            for(let i=1; i < this.spheres.length; i++) {
+                                const s = this.spheres[i];
+                                const t = i / (this.length - 1);
+                                const newCol = this.headColor.clone().lerp(this.bodyColor, t);
+                                s.material.color.copy(newCol);
+                            }
+                        }
+                    }
+                }
+
+                // Avoid Continent Peaks (Central 50%)
+                for(let cont of continents) {
+                    const contPos = new THREE.Vector3();
+                    cont.meshGroup.getWorldPosition(contPos);
+
+                    const d = this.pos.distanceTo(contPos);
+                    
+                    // We only want to avoid the center "Mountain" part
+                    // Let's say the danger zone is 50% of the radius
+                    const dangerRad = cont.radius * 0.5; 
+
+                    if (d < dangerRad) {
+                        const normal = this.pos.clone().normalize();
+                        
+                        const dir = new THREE.Vector3().subVectors(this.pos, contPos).normalize();
+                        dir.sub(normal.clone().multiplyScalar(dir.dot(normal))).normalize();
+
+                        const cross = normal.clone().cross(dir).normalize();
+                        
+                        // Push away from peak
+                        this.applyForce(dir.multiplyScalar(3.0)); 
+                        // Side-step
+                        this.applyForce(cross.multiplyScalar(1.0)); 
+                    }
+                }
+
+                this.vel.add(this.acc);
+                this.vel.clampLength(0, this.maxSpeed);
+                this.pos.add(this.vel);
+                this.acc.set(0, 0, 0);
+
+                const sphereRadius = CONFIG.atmosRadius; 
+                this.pos.normalize().multiplyScalar(sphereRadius);
+
+                const normal = this.pos.clone().normalize();
+                const radialComponent = normal.clone().multiplyScalar(this.vel.dot(normal));
+                this.vel.sub(radialComponent);
+
+                // Update Trail History
+                this.trailPoints.pop(); 
+                this.trailPoints.unshift(this.pos.clone()); 
+                
+                // Update Sphere Positions based on spacing
+                for(let i=0; i<this.length; i++) {
+                    const index = i * this.spacingInterval;
+                    if (index < this.trailPoints.length) {
+                        this.spheres[i].position.copy(this.trailPoints[index]);
+                    }
+                }
+            }
+        }
+
+        // --- Main Initialization ---
+        function init() {
+            const container = document.getElementById('canvas-container');
+            
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x0b1026);
+            
+            const pointLight = new THREE.PointLight(0xffffff, 2, 0);
+            pointLight.position.set(0, 0, 0);
+            scene.add(pointLight);
+
+            const ambientLight = new THREE.AmbientLight(0xffffff, 6.0); 
+            scene.add(ambientLight);
+
+            // --- CAMERA SETUP ---
+            camera = new THREE.PerspectiveCamera(85, 900 / 900, 10, 10000);
+            camera.position.set(0, 0, 2000);
+            camera.lookAt(0, 0, 0);
+
+            renderer = new THREE.WebGLRenderer({ 
+                antialias: true,
+                preserveDrawingBuffer: true 
+            });
+            renderer.setSize(900, 900); // Fixed 900px Size
+            renderer.setPixelRatio(window.devicePixelRatio);
+            container.appendChild(renderer.domElement);
+
+            // --- PLANET GROUP ---
+            // Holds the sphere, continents, and clouds so they rotate together
+            planetGroup = new THREE.Group();
+            scene.add(planetGroup);
+
+            // --- Enclosing Sphere (Transparent "Planet" Shader) ---
+            const sphereGeo = new THREE.SphereGeometry(CONFIG.worldRadius, 64, 64);
+            const sphereMat = createAtmosphereMaterial();
+            enclosingSphere = new THREE.Mesh(sphereGeo, sphereMat);
+            planetGroup.add(enclosingSphere);
+
+            // Create Milky Way Background (Stays in Scene, separate from Planet)
+            milkyWay = createMilkyWay();
+
+            // Create Continents (Anchored to PlanetGroup)
+            for (let i = 0; i < CONFIG.numContinents; i++) {
+                const continent = new Continent();
+                continents.push(continent);
+            }
+
+            // Create Clouds (Anchored to PlanetGroup but behave like weather)
+            for (let i = 0; i < CONFIG.numClouds; i++) {
+                const cloud = new Cloud();
+                clouds.push(cloud);
+            }
+
+            // Create Particles (Independent, traverse the world)
+            for (let i = 0; i < CONFIG.numParticles; i++) {
+                
+                // Randomize Personality per Boid
+                // Length: 10-25
+                const boidLength = 10 + Math.floor(Math.random() * 15); 
+                
+                // Head Color: Ranges around Orange/Red
+                const headHue = 0.0 + Math.random() * 0.1; 
+                const headColor = new THREE.Color().setHSL(headHue, 1.0, 0.5);
+
+                // Body Color: Complementary Blues/Purples
+                const bodyHue = 0.5 + Math.random() * 0.3; 
+                const bodyColor = new THREE.Color().setHSL(bodyHue, 0.8, 0.6);
+                
+                const options = {
+                    headColor: headColor,
+                    bodyColor: bodyColor,
+                    length: boidLength,
+                    headRadius: 10 + Math.random() * 8, // 10-18
+                    tailRadius: 2 + Math.random() * 3, // 2-5
+                    spacingInterval: 2 + Math.floor(Math.random() * 2) // 2 or 3
+                };
+
+                particles.push(new Particle3D(options));
+            }
+
+            setupControls();
+            
+            animate();
+        }
+
+        function setupControls() {
+            const modal = document.getElementById('print-modal');
+            const btnCancel = document.getElementById('btn-cancel');
+            const btnPrint = document.getElementById('btn-print');
+            const inpWidth = document.getElementById('inp-width');
+            const inpHeight = document.getElementById('inp-height');
+            const inpFilename = document.getElementById('inp-filename');
+
+            window.addEventListener('keydown', (e) => {
+                if (e.code === 'Space') {
+                    if (modal.style.display !== 'block') {
+                        e.preventDefault();
+                        isPaused = !isPaused;
+                    }
+                }
+                if ((e.metaKey || e.ctrlKey) && e.code === 'KeyP') {
+                    e.preventDefault(); 
+                    inpWidth.value = 900;
+                    inpHeight.value = 900;
+                    modal.style.display = 'block';
+                }
+            });
+
+            btnCancel.addEventListener('click', () => {
+                modal.style.display = 'none';
+            });
+
+            btnPrint.addEventListener('click', () => {
+                const w = parseInt(inpWidth.value) || 900;
+                const h = parseInt(inpHeight.value) || 900;
+                const filename = inpFilename.value || 'StarryNightCapture.png';
+                saveHighResImage(w, h, filename);
+                modal.style.display = 'none';
+            });
+        }
+
+        function saveHighResImage(targetWidth, targetHeight, filename) {
+            const originalWidth = 900;
+            const originalHeight = 900;
+
+            renderer.setSize(targetWidth, targetHeight);
+            camera.aspect = targetWidth / targetHeight;
+            camera.updateProjectionMatrix();
+
+            renderer.render(scene, camera);
+
+            try {
+                const dataURL = renderer.domElement.toDataURL('image/png');
+                const link = document.createElement('a');
+                link.href = dataURL;
+                link.download = filename;
+                link.click();
+            } catch (err) {
+                console.error("Error saving image:", err);
+            }
+
+            renderer.setSize(originalWidth, originalHeight);
+            camera.aspect = originalWidth / originalHeight;
+            camera.updateProjectionMatrix();
+            renderer.render(scene, camera);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            if (isPaused) {
+                renderer.render(scene, camera);
+                return;
+            }
+
+            time += 0.005;
+
+            // Rotate the entire planet (Day/Night cycle)
+            if (planetGroup) {
+                planetGroup.rotation.y += 0.001; 
+            }
+
+            // Rotate the galaxy background separately
+            if (milkyWay) {
+                milkyWay.rotation.y += 0.0001;
+            }
+
+            continents.forEach(c => c.update(0.05));
+            clouds.forEach(c => c.update(0.05));
+            
+            // Pass Clouds and Continents to particles for avoidance
+            particles.forEach(p => p.update(particles, clouds, continents));
+
+            renderer.render(scene, camera);
+        }
+
+        init();
+
+    </script>
+</body>
+</html>
